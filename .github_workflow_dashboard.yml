@@ -1,1 +1,56 @@
+name: 정부지원사업 대시보드 자동화
 
+on:
+  schedule:
+    - cron: "0 23 * * *"   # 매일 KST 08:00
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # data/, outputs/ 파일을 저장소에 커밋하기 위해 필요
+
+jobs:
+  run-and-commit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 시스템 패키지 설치
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl poppler-utils tesseract-ocr tesseract-ocr-kor
+
+      - name: 파이썬 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 1단계 - 기업마당 신규공고 수집 및 메일 발송 (+ 누적파일 갱신)
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_MODEL: "openrouter/free"
+          KR_PROXY_URL: ${{ secrets.KR_PROXY_URL }}
+        run: |
+          python scripts/bizinfo_bot.py
+
+      - name: 2단계 - 대시보드 재생성 (①②③ 매칭·집계)
+        run: |
+          python scripts/build_dashboard.py
+
+      - name: 3단계 - 변경사항 저장소에 커밋
+        run: |
+          git config user.name "bizinfo-bot"
+          git config user.email "bizinfo-bot@users.noreply.github.com"
+          git add data/daily_accumulated.xlsx outputs/정부지원사업_대시보드.xlsx
+          git diff --cached --quiet && echo "변경사항 없음" || git commit -m "chore: 누적 데이터 및 대시보드 자동 갱신 ($(date +'%Y-%m-%d'))"
+          git push
