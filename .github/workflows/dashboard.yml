@@ -47,6 +47,14 @@ jobs:
         run: |
           python scripts/build_dashboard.py
 
+      - name: 2-1단계 - 대시보드 이메일 발송
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+        run: |
+          python scripts/send_dashboard_email.py
+
       - name: 3단계 - 변경사항 저장소에 커밋
         run: |
           git config user.name "bizinfo-bot"
