@@ -2,7 +2,7 @@ name: 정부지원사업 대시보드 자동화
 
 on:
   schedule:
-    - cron: "0 23 * * *"   # 매일 KST 08:00
+    - cron: "0 18 * * *"   # 매일 KST 03:00
   workflow_dispatch: {}
 
 permissions:
