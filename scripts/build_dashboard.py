@@ -313,6 +313,21 @@ HEADER_FILL = PatternFill(start_color="111827", end_color="111827", fill_type="s
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 
 
+try:
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+except ImportError:
+    ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def sanitize_for_excel(value):
+    """PDF/HWP/OCR 추출 결과에 섞여 들어올 수 있는 제어문자를 제거합니다
+    (bizinfo_bot.py의 동일 함수와 같은 이유 - openpyxl이 이런 문자가 있으면
+    IllegalCharacterError를 던져서 저장 전체가 실패합니다)."""
+    if isinstance(value, str):
+        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    return value
+
+
 def _write_df_sheet(wb, sheet_name, title, subtitle, df, col_widths=None, dropdown_columns=None):
     """
     dropdown_columns: {"컬럼명": ["Y", "N"]} 형태로 지정하면, 그 컬럼 전체
@@ -333,7 +348,7 @@ def _write_df_sheet(wb, sheet_name, title, subtitle, df, col_widths=None, dropdo
         cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     for row in df.itertuples(index=False):
-        ws.append(list(row))
+        ws.append([sanitize_for_excel(v) for v in row])
 
     if col_widths:
         for i, w in enumerate(col_widths, start=1):
