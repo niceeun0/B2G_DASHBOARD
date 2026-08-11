@@ -82,8 +82,32 @@ try:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
+    try:
+        from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+    except ImportError:
+        # 구버전 openpyxl 대비 폴백 (openpyxl이 실제로 거부하는 것과 동일한 패턴)
+        ILLEGAL_CHARACTERS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 except ImportError:
     openpyxl = None
+    ILLEGAL_CHARACTERS_RE = None
+
+
+def sanitize_for_excel(value):
+    """
+    PDF/HWP/OCR로 텍스트를 추출하다 보면 세로탭(\\x0b) 등 XML/엑셀에서
+    허용하지 않는 제어문자가 섞여 들어오는 경우가 있습니다. 이런 문자가
+    하나라도 있으면 openpyxl이 IllegalCharacterError를 던지면서 그 시점까지
+    처리한 작업 전체가 저장되지 않고 날아가버리므로, 셀에 쓰기 전에
+    반드시 제거합니다.
+    """
+    if isinstance(value, str) and ILLEGAL_CHARACTERS_RE is not None:
+        return ILLEGAL_CHARACTERS_RE.sub("", value)
+    return value
+
+
+def sanitize_row_for_excel(row_values):
+    """행(리스트) 전체에 sanitize_for_excel을 적용."""
+    return [sanitize_for_excel(v) for v in row_values]
 
 
 # =========================================================
@@ -1274,7 +1298,7 @@ def build_xlsx_bytes(items_data):
         cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     for row in items_data:
-        ws.append([row.get(key, "") for _, key in EXPORT_COLUMNS])
+        ws.append(sanitize_row_for_excel([row.get(key, "") for _, key in EXPORT_COLUMNS]))
 
     widths = [_COLUMN_WIDTH_OVERRIDES.get(label, _DEFAULT_COLUMN_WIDTH) for label, _ in EXPORT_COLUMNS]
     for i, w in enumerate(widths, start=1):
@@ -1373,9 +1397,9 @@ def append_to_accumulator(items_data, path=ACCUMULATOR_PATH):
     ws_new.append(headers)
     # 기존 행/신규 행 모두 '컬럼 이름 -> 값' 딕셔너리에서 현재 헤더 순서에 맞게 뽑아 씀
     for row_dict in existing_row_dicts:
-        ws_new.append([row_dict.get(label, "") for label in headers])
+        ws_new.append(sanitize_row_for_excel([row_dict.get(label, "") for label in headers]))
     for row_dict in new_row_dicts:
-        ws_new.append([row_dict.get(key, "") for label, key in EXPORT_COLUMNS])
+        ws_new.append(sanitize_row_for_excel([row_dict.get(key, "") for label, key in EXPORT_COLUMNS]))
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     wb_new.save(path)
@@ -1584,6 +1608,26 @@ def main():
     target_date = (now_kst - timedelta(days=1)).date()
     log(f"대상 등록일(전날): {target_date}")
 
+    # 하루에 여러 번(예: 08시 실패 시 14시에 재시도) 예약되어 있을 수 있습니다.
+    # 오늘 대상 날짜(target_date)가 이미 성공적으로 처리됐다면, 같은 날 다시
+    # 실행되더라도 중복 수집/중복 메일 발송 없이 조용히 종료합니다.
+    status_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "data", "last_run_status.json"
+    )
+    if os.path.exists(status_path):
+        try:
+            import json
+            with open(status_path, encoding="utf-8") as f:
+                last_status = json.load(f)
+            if last_status.get("target_date") == str(target_date) and last_status.get("success"):
+                log(
+                    f"{target_date}는 이미 오늘 다른 실행에서 성공적으로 처리됐습니다 "
+                    "(하루 중 재시도 스케줄로 재실행된 것으로 보임) - 중복 발송 방지를 위해 건너뜁니다."
+                )
+                return
+        except Exception as e:
+            log(f"이전 실행 상태 확인 실패(계속 진행합니다): {e}")
+
     try:
         raw_items = fetch_bizinfo_items()
     except Exception as e:
@@ -1729,16 +1773,24 @@ def main():
     # 오늘 신규 등록 건수를 별도 상태 파일에 기록합니다. 주말/공휴일 다음날
     # (기업마당에 신규 등록이 없는 날)에 send_dashboard_email.py가 이 값을
     # 읽어서 무거운 대시보드 전체를 다시 보내는 대신 짧은 알림만 보낼 수
-    # 있게 하기 위함입니다.
-    try:
-        import json
-        status_path = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "data", "last_run_status.json"
-        )
-        with open(status_path, "w", encoding="utf-8") as f:
-            json.dump({"target_date": str(target_date), "new_count": len(items_data)}, f, ensure_ascii=False)
-    except Exception as e:
-        log(f"실행 상태 파일 기록 실패(치명적이지 않음): {e}")
+    # 있게 하기 위함입니다. success는 아직 False - 메일 발송까지 끝나면
+    # True로 갱신합니다 (그래야 이번 실행이 중간에 실패해도 하루 중
+    # 재시도 스케줄이 정상적으로 다시 시도할 수 있음).
+    def _write_status(success):
+        try:
+            import json
+            with open(status_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "target_date": str(target_date), "new_count": len(items_data),
+                        "success": success, "dashboard_email_sent": False,
+                    },
+                    f, ensure_ascii=False,
+                )
+        except Exception as e:
+            log(f"실행 상태 파일 기록 실패(치명적이지 않음): {e}")
+
+    _write_status(success=False)
 
     # 원클릭우선순위 산정: 사업규모(금액) 순위 + 원클릭매칭서류개수 순위를
     # 합산해서 점수가 낮을수록(둘 다 상위일수록) 높은 우선순위를 부여합니다.
@@ -1784,6 +1836,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
 
+    _write_status(success=True)
     log("=== 봇 실행 완료 ===")
 
 
