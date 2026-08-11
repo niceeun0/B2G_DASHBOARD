@@ -43,19 +43,29 @@ STATUS_PATH = os.path.join(os.path.dirname(BASE_DIR), "data", "last_run_status.j
 EMAIL_SHEETS = ["대시보드_우선순위_랭킹", "공공기관별_컨택디렉토리", "매일업로드_원천데이터"]
 
 
-def read_new_count():
-    """bizinfo_bot.py가 기록한 '오늘 신규 등록 건수'를 읽습니다. 못 읽으면
-    None을 반환 (이 경우 안전하게 항상 대시보드를 보내는 쪽으로 동작)."""
+def read_status():
+    """bizinfo_bot.py가 기록한 실행 상태를 읽습니다. 못 읽으면 빈 dict."""
     if not os.path.exists(STATUS_PATH):
-        return None
+        return {}
     try:
         import json
         with open(STATUS_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("new_count")
+            return json.load(f)
     except Exception as e:
         bot.log(f"실행 상태 파일을 읽지 못했습니다(항상 대시보드를 보냅니다): {e}")
-        return None
+        return {}
+
+
+def mark_dashboard_email_sent(status):
+    """이 스크립트가 오늘 메일을 보냈다는 걸 상태 파일에 남깁니다 - 하루 중
+    재시도 스케줄로 다시 실행되더라도 같은 내용을 중복 발송하지 않기 위함."""
+    try:
+        import json
+        status["dashboard_email_sent"] = True
+        with open(STATUS_PATH, "w", encoding="utf-8") as f:
+            json.dump(status, f, ensure_ascii=False)
+    except Exception as e:
+        bot.log(f"실행 상태 파일 갱신 실패(치명적이지 않음): {e}")
 
 
 def build_lightweight_xlsx_bytes(path):
@@ -71,7 +81,7 @@ def build_lightweight_xlsx_bytes(path):
         dst = light.create_sheet(sheet_name)
         for row in src.iter_rows():
             for cell in row:
-                dst.cell(row=cell.row, column=cell.column, value=cell.value)
+                dst.cell(row=cell.row, column=cell.column, value=bot.sanitize_for_excel(cell.value))
         # 열 너비도 최대한 유지 (가독성)
         for col_letter, dim in src.column_dimensions.items():
             if dim.width:
@@ -154,11 +164,23 @@ def main():
     kst = timezone(timedelta(hours=9))
     today_str = datetime.now(kst).strftime("%Y-%m-%d")
 
-    new_count = read_new_count()
+    status = read_status()
+    new_count = status.get("new_count")
+
+    # 하루 중 재시도 스케줄(예: 08시 실패 -> 14시 재시도)로 다시 실행된
+    # 경우, 오늘 이미 대시보드 메일을 보냈다면 중복 발송하지 않고 건너뜁니다.
+    if status.get("dashboard_email_sent"):
+        bot.log(
+            f"오늘({status.get('target_date')}) 대시보드 메일은 이미 발송됐습니다 "
+            "(하루 중 재시도 스케줄로 재실행된 것으로 보임) - 중복 발송 방지를 위해 건너뜁니다."
+        )
+        return
+
     if new_count == 0:
         bot.log(f"오늘 신규 등록 0건 확인 - 짧은 알림만 보내고 대시보드 첨부는 건너뜁니다.")
         try:
             send_no_new_notice(today_str, new_count)
+            mark_dashboard_email_sent(status)
         except Exception as e:
             bot.log(f"[치명적 오류] 알림 메일 발송 실패: {e}")
             sys.exit(1)
@@ -200,6 +222,7 @@ def main():
             attachment_bytes=zip_bytes_data,
             attachment_filename=zip_filename,
         )
+        mark_dashboard_email_sent(status)
     except Exception as e:
         bot.log(f"[치명적 오류] 대시보드 메일 발송 실패: {e}")
         sys.exit(1)
