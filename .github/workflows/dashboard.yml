@@ -12,6 +12,14 @@ on:
 permissions:
   contents: write   # data/, outputs/ 파일을 저장소에 커밋하기 위해 필요
 
+# 재시도 스케줄(03/04/05/06/08시)이 GitHub 큐 지연 등으로 겹치더라도, 앞
+# 실행이 커밋/푸시까지 완전히 끝난 뒤에야 다음 실행이 시작되도록 합니다.
+# 이게 없으면 두 실행이 동시에 체크아웃해서 서로 "아직 성공 안 했다"고
+# 잘못 판단해 메일이 중복 발송될 수 있습니다.
+concurrency:
+  group: bizinfo-dashboard-daily
+  cancel-in-progress: false
+
 jobs:
   run-and-commit:
     runs-on: ubuntu-latest
@@ -63,6 +71,6 @@ jobs:
         run: |
           git config user.name "bizinfo-bot"
           git config user.email "bizinfo-bot@users.noreply.github.com"
-          git add data/daily_accumulated.xlsx outputs/정부지원사업_대시보드.xlsx
+          git add data/daily_accumulated.xlsx outputs/정부지원사업_대시보드.xlsx data/last_run_status.json
           git diff --cached --quiet && echo "변경사항 없음" || git commit -m "chore: 누적 데이터 및 대시보드 자동 갱신 ($(date +'%Y-%m-%d'))"
           git push
